@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,8 +23,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.adapters.win_dialog import open_file_dialog, open_folder_dialog
+from app.core.desktop_items import kind_for_path
 from app.core.models import LaunchResult, Project, Resource, ResourceKind
 from app.core.resource_check import check_resource
+from app.ui.desktop_picker import DesktopPickerDialog
 
 
 class ProjectDialog(QDialog):
@@ -116,7 +117,7 @@ class ResourceDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("编辑资源" if resource else "添加资源")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(640)
 
         self._kind_combo = QComboBox()
         for kind in (
@@ -133,16 +134,25 @@ class ResourceDialog(QDialog):
         self._browse = QPushButton("浏览…")
         self._browse.clicked.connect(self._browse_target)
 
+        self._desktop_button = QPushButton("从桌面导入")
+        self._desktop_button.setToolTip(
+            "同时列出用户桌面和公共桌面；快捷方式会保留 .lnk 本身"
+        )
+        self._desktop_button.clicked.connect(self._import_from_desktop)
+
         target_row = QHBoxLayout()
         target_row.addWidget(self._target, 1)
         target_row.addWidget(self._browse)
+        target_row.addWidget(self._desktop_button)
 
         self._hint = QLabel("")
         self._hint.setWordWrap(True)
 
+        self._target_label = QLabel("目标")
+
         form = QFormLayout()
         form.addRow("类型", self._kind_combo)
-        form.addRow("目标", target_row)
+        form.addRow(self._target_label, target_row)
         form.addRow("", self._hint)
 
         buttons = QDialogButtonBox(
@@ -172,28 +182,54 @@ class ResourceDialog(QDialog):
 
     def _on_kind_changed(self) -> None:
         kind = self._kind()
+        self._target_label.setText(
+            "网址" if kind is ResourceKind.URL else "目标"
+        )
         self._target.setPlaceholderText(_PLACEHOLDERS[kind])
-        self._browse.setEnabled(kind is not ResourceKind.URL)
+        self._browse.setVisible(kind is not ResourceKind.URL)
         self._browse.setText(_BROWSE_TEXT.get(kind, "浏览…"))
+        self._desktop_button.setVisible(kind is not ResourceKind.URL)
         self._update_hint()
+
+    def _set_kind(self, kind: ResourceKind) -> None:
+        index = self._kind_combo.findData(kind.value)
+        if index >= 0:
+            self._kind_combo.setCurrentIndex(index)
+
+    def _import_from_desktop(self) -> None:
+        picker = DesktopPickerDialog(self)
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+        path = picker.selected_path()
+        if path is None:
+            return
+        self._target.setText(str(path))
+        self._set_kind(kind_for_path(path))
 
     def _browse_target(self) -> None:
         kind = self._kind()
-        start = self._target.text().strip() or str(Path.home())
-
-        if kind is ResourceKind.FILE:
-            path, _ = QFileDialog.getOpenFileName(self, "选择文件", start)
-        elif kind is ResourceKind.FOLDER:
-            path = QFileDialog.getExistingDirectory(self, "选择文件夹", start)
-        elif kind is ResourceKind.APP:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择程序", start, "可执行文件 (*.exe *.com)"
-            )
-        else:
+        if kind is ResourceKind.URL:
             return
 
-        if path:
-            self._target.setText(str(Path(path)))
+        try:
+            if kind is ResourceKind.FILE:
+                path = open_file_dialog(int(self.winId()), "选择文件")
+            elif kind is ResourceKind.FOLDER:
+                path = open_folder_dialog(int(self.winId()), "选择文件夹")
+            elif kind is ResourceKind.APP:
+                path = open_file_dialog(
+                    int(self.winId()),
+                    "选择程序",
+                    file_types=[("可执行文件", "*.exe;*.com")],
+                )
+            else:
+                return
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.warning(self, "无法打开文件对话框", str(exc))
+            return
+
+        if path is not None:
+            self._target.setText(str(path))
 
     def _update_hint(self) -> None:
         target = self._target.text().strip()
